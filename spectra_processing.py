@@ -9,8 +9,10 @@ import matplotlib.pyplot as plt
 import matplotlib as mpl
 import numpy as np
 import glob
+import os
 
-from astropy.modeling.fitting import LevMarLSQFitter, LinearLSQFitter
+from scipy.interpolate import CubicSpline
+from astropy.modeling.fitting import LevMarLSQFitter, LinearLSQFitter, SimplexLSQFitter
 from astropy.modeling import models
 from astropy import units as u
 import lineid_plot
@@ -40,6 +42,145 @@ def LoadAllSpectra(path, common_part):
 
     return spectra
 
+def LoadAttenuation(path, filename):
+
+    file_path = os.path.join(path,filename)
+    _, file_extension = os.path.splitext(file_path)
+
+    if file_extension in ['.xlsx', '.xls', '.xlsm']:
+        df = pd.read_excel(file_path, sheet_name='Attenuation Data', usecols=[2,3], skiprows = 1)
+    elif file_extension in ['.txt', '.csv']:
+        df = pd.read_csv(file_path, skiprows = 1, sep = '\t', header = None)
+    #print(df)
+    df = df.dropna()
+    df.columns = ['wavelength', 'intensity']
+    # Remove commas and convert to numeric values for each relevant column
+    df['wavelength'] = pd.to_numeric(df['wavelength'])
+    # print(df['wavelength'])
+    df['intensity'] = pd.to_numeric(df['intensity'], downcast='float')
+    # print(df['intensity'])
+
+    # plt.plot(df['wavelength'], df['intensity'])
+    # plt.show()
+
+    return df
+
+def CorrectAttenuation(spectra, attenuation):
+
+
+    attenuation_wvl = attenuation.loc[:, 'wavelength'].values
+    attenuation_coef = attenuation.loc[:, 'intensity'].values
+    # Convert attenuation to transmission efficiency
+    transmission = np.power(10, -(attenuation_coef*1e-3) / 10)
+
+    corrected_spectra = []
+    for data in spectra:
+
+        corrected_df = data.copy()
+        wavelength = data.loc[:, 'wavelength'].values
+        intensity = data.loc[:, 'intensity'].values
+        minwavelength = np.min(attenuation_wvl)
+        maxwavelength = np.max(wavelength)
+        # print(minwavelength)
+
+        mask = (wavelength >= minwavelength) & (wavelength <= maxwavelength)
+        wavelength_truncated = wavelength[mask]
+        intensity_truncated = intensity[mask]
+        # print(intensity_truncated.shape)
+
+        transmission_interpolate = CubicSpline(attenuation_wvl, transmission)
+        transmission_corsize = transmission_interpolate(wavelength_truncated)
+
+        # print(intensity)
+        corrected_df.loc[mask, 'intensity'] = intensity_truncated / transmission_corsize
+        corrected_spectra.append(corrected_df)
+
+
+        # Plot original and corrected spectra
+        # fig, ax = plt.subplots(figsize=(10, 8))
+        # ax.plot(corrected_df['wavelength'], corrected_df['intensity'], label='Corrected Spectra', color='green')
+        # ax.plot(wavelength, intensity, label='Original Spectra', color='red')
+        # ax.set_xlabel('Wavelength')
+        # ax.set_ylabel('Intensity')
+        # ax.legend()
+        # ax.grid(True)
+        # plt.title("Original vs Corrected Spectra")
+        # plt.show()
+
+
+    return corrected_spectra
+
+def CalcSNRData(sum_data, sigma_dark, sigma_background,subtract_background = False, subtract_dark = False,plot_snr=False):
+    #required_columns = ['wavelength', 'intensity']
+
+    ## Check if input data frames are valid
+    #for df in [background, dark, *rawdata]:
+        #if not isinstance(df, pd.DataFrame) or set(df.columns) != set(required_columns):
+            #raise ValueError("Invalid input data frame format or columns.")
+
+    ## Check if input data frames have the same length
+    #background_length = len(background)
+    #dark_length = len(dark)
+    #if any(len(data) != background_length or len(data) != dark_length for data in rawdata):
+        #raise ValueError("Input data frames must have the same length.")
+
+
+
+
+    wavelength = sum_data.loc[:, 'wavelength'].values
+    intensity = sum_data.loc[:, 'intensity'].values
+
+    # Add all background and dark contributions for each spectrum
+    noise_aux=0
+
+    processed_df = sum_data.copy()
+    if subtract_background:
+        noise_aux = sigma_background['intensity'].values**2
+
+    # print(noise_aux)
+    if subtract_dark:
+        noise_aux += sigma_dark['intensity'].values**2
+    # print(noise_aux)
+    noise_aux += processed_df['intensity'].values
+    # print(noise_aux)
+    snr = processed_df['intensity'].values/np.sqrt(noise_aux)
+    #processed_df['intensity'] = processed_df['intensity'].clip(lower=0)  # Ensure non-negative intensities
+
+    if plot_snr:
+        fig, ax = plt.subplots(2, 1, figsize=(10, 8))
+
+        ax[0].plot(wavelength, snr,label= 'SNR')
+
+        ax[0].minorticks_on()
+        ax[0].xaxis.set_minor_locator(plt.MultipleLocator(10))
+        ax[0].grid(True, 'both')
+        ax[0].set_xlabel(f'Wavelength, nm')
+        ax[0].set_ylabel(f'SNR')
+        ax[0].set_title('Signal to Noise Ratio')
+        ax[0].legend()
+
+
+        print(sigma_dark)
+        ax[1].plot(wavelength,sigma_background['intensity'].values,label='Background Noise')
+        ax[1].plot(wavelength,sigma_dark['intensity'].values,label='Dark Noise')
+        ax[1].plot(wavelength, np.sqrt(processed_df['intensity'].values),label= 'Spectra Noise')
+        ax[1].plot(wavelength, np.sqrt(noise_aux),label= 'Total Noise')
+
+        ax[1].minorticks_on()
+        ax[1].xaxis.set_minor_locator(plt.MultipleLocator(10))
+        ax[1].grid(True, 'both')
+        ax[1].set_xlabel(f'Wavelength, nm')
+        ax[1].set_ylabel(f'Intensity, counts')
+        ax[1].set_title('Noise Contributors')
+        ax[1].legend()
+
+
+        plt.show()
+
+
+
+    return snr
+
 def AverageSpectra(spectra):
     '''
     Please have your spectra in the following form:
@@ -52,7 +193,7 @@ def AverageSpectra(spectra):
 
     return average_spectra
 
-def ProcessDataEach(rawdata, background, dark, subtract_background = False, subtract_dark = False):
+def ProcessDataEach(rawdata, background, dark, flat, subtract_background = False, subtract_dark = False, divide_flat = False):
     #required_columns = ['wavelength', 'intensity']
 
     ## Check if input data frames are valid
@@ -75,7 +216,8 @@ def ProcessDataEach(rawdata, background, dark, subtract_background = False, subt
             processed_df['intensity'] -= background['intensity'].values
         if subtract_dark:
             processed_df['intensity'] -= dark['intensity'].values
-        #processed_df['intensity'] = processed_df['intensity'].clip(lower=0)  # Ensure non-negative intensities
+        if divide_flat:
+            processed_df['intensity'] /= flat['intensity'].values/np.max(flat['intensity'])
         processed_data.append(processed_df)
 
     return processed_data
@@ -131,8 +273,8 @@ def PlotData(ax, data, name, labelname):
 
 def DefSpectrumForLines(spectr, minwavelength, maxwavelength):
 
-    wavelength = sum_spectra.loc[:, 'wavelength'].values
-    intensity = sum_spectra.loc[:, 'intensity'].values
+    wavelength = spectr.loc[:, 'wavelength'].values
+    intensity = spectr.loc[:, 'intensity'].values
 
     mask = (wavelength >= minwavelength) & (wavelength <= maxwavelength)
     wavelength_truncated = wavelength[mask]
@@ -164,7 +306,30 @@ def FitContinuum(degree, wavelength, intensity, image = False):
 
     return spec_norm
 
-def DetectAndPlotLines(spectra, wavelength, spectral_lines, telluric_lines, threshold, title = None, save = False, path = None, name = None):
+def BlackBodyFit(temperature, wavelength, intensity, image = False):
+
+    bb = models.BlackBody(temperature=temperature*u.K, scale = 1)
+    fitter = SimplexLSQFitter()
+    intensity_flux = intensity / np.max(intensity)
+    fit = fitter(bb, wavelength*u.nm, intensity_flux)
+    # plt.plot(wavelength*u.nm, bb(wavelength*u.nm))
+    spec_norm = (intensity_flux - fit(wavelength*u.nm).value)/np.linalg.norm(intensity_flux - fit(wavelength*u.nm).value)
+
+    if image == True:
+        fig, ax = plt.subplots(2, 1, figsize=(10, 8))
+        ax[0].plot(wavelength, intensity_flux, label='Original Spectrum')
+        ax[0].plot(wavelength, fit(wavelength*u.nm), label='Fitted Continuum')
+        ax[0].set_title('Continuum Fitting')
+        ax[0].legend()
+        ax[0].grid(True)
+
+        # ax[1].plot(wavelength_truncated, spec_norm.flux)
+        ax[1].plot(wavelength, spec_norm)
+        ax[1].set_title('Continuum Normalized Spectrum')
+        ax[1].grid(True)
+
+
+def DetectAndPlotLines(spectra, wavelength_truncated, spectral_lines, telluric_lines, threshold, title = None, save = False, path = None, name = None):
 
     detected_lines = {}
     telluric_lines_d = {}
@@ -217,77 +382,3 @@ def DetectAndPlotLines(spectra, wavelength, spectral_lines, telluric_lines, thre
 
 
     return
-
-#if __name__ == '__main__':
-
-    #path = ''
-    #savefold = ''
-
-    #spectral_lines = {
-    #"Hα": 656.3,
-    #"Hβ": 486.1,
-    #"Hγ": 434.0,
-    #"Hδ": 410.2,
-    #"He II": 420.0,
-    #"He II": 454.1,
-    #"He I": 447.1,
-    #"He I": 402.6,
-    #"He I": 667.8,
-    #"Fe I": 495.8,
-    #"Fe I": 466.8,
-    #"Fe I": 438.4,
-    #"Ca I": 420.8,
-    #"Fe I": 527.0,
-    #"Fe II": 516.90,
-    #"Mg I": 518.0,
-    #"Na I D1": 589.00,
-    #"Na I D2": 589.60,
-    #"Ca II H": 396.85,
-    #"Ca II K": 393.37,
-    #"Ca II IR 1": 849.80,
-    #"Ca II IR 2": 854.20,
-    #"Ca II IR 3": 866.20,
-    #"[O I] 1": 630.0,
-    #"[O I] 2": 636.4,
-    #"C II": 426.7,
-    #"Si II": 412.8,
-    #"Si II": 634.7,
-    #"Si II": 637.1,
-    #"Mg II": 448.1,
-    #"O I": 898.8,
-    #"O I": 822.7,
-    #"O I": 759.4,
-    #"O I": 686.7,
-    #"O I": 627.7,
-    #"O I": 777.1,
-    #"O I": 777.4,
-    #"O I": 777.5,
-    #"He I": 587.6,
-    #"Ti II": 336.1,
-    #"Ni I": 299.4,
-    #"TiO": 476.1,
-    #"TiO": 495.4,
-    #"TiO": 516.7
-    #}
-
-    #telluric_lines = {"TL":
-    #[687.8,
-     #718.5,
-     #719.4,
-     #725.0,
-    #759.3,  # O2 (760.0 nm region)
-    #760.5,
-    #761.0,  # O2 (760.5 nm region)
-    #762.0,  # O2 (762.0 nm region)
-    #764.0,  # H2O (763.0-764.0 nm region)
-    #820.5,  # H2O (820.0-821.0 nm region)
-    #822.2,  # H2O (822.0 nm region)
-    #935.0,  # H2O (934.0-935.0 nm region)
-    #940.0,  # H2O (940.0 nm region)
-    #942.0,  # H2O (942.0 nm region)
-    #940.5,  # H2O (940.5 nm region)
-    #943.0,  # H2O (943.0 nm region)
-    #946.0,  # H2O (946.0 nm region)
-    #953.0,  # H2O (953.0 nm region)
-    #960.0,  # H2O (960.0 nm region)
-#]}
