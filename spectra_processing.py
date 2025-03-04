@@ -10,8 +10,9 @@ import matplotlib as mpl
 import numpy as np
 import glob
 import os
+import itertools
 
-from scipy.interpolate import CubicSpline
+from scipy.interpolate import CubicSpline, interp1d
 from astropy.modeling.fitting import LevMarLSQFitter, LinearLSQFitter, SimplexLSQFitter
 from astropy.modeling import models
 from astropy import units as u
@@ -19,8 +20,8 @@ import lineid_plot
 
 def LoadData(filename, skiprows = 14):
 
-    df = pd.read_csv(filename, skiprows = skiprows, sep = '\t', header = None)
-    #print(df)
+    df = pd.read_csv(filename, skiprows = skiprows, usecols = [0, 1], sep = r'\s+', header = None)
+    # print(df)
 
     df.columns = ['wavelength', 'intensity']
 
@@ -48,7 +49,7 @@ def LoadAllSpectra(path, common_part):
     # Load each file into a DataFrame and store in a list
     spectra = []
     for filename in files:
-        print(filename)
+        # print(filename)
         df = LoadData(filename)
 
         spectra.append(df)
@@ -235,24 +236,20 @@ def ProcessDataEach(rawdata, background, dark, flat, subtract_background = False
 
     return processed_data
 
-def Build_Instrument_Response(data, reference, plot=False):
+def Build_Instrument_Response(data, reference, minwavelength = 360, maxwavelength = 1100, plot =False):
     #required_columns = ['wavelength', 'intensity']
 
     #get wavelengths of our data and of our reference
     wavelength = data['wavelength'].values
-    intensity  =data['intensity'].values
+    intensity  = data['intensity'].values
     wavelength_stand = reference['wavelength'].values
-    intensity_stand = reference['intensity'].values
-
-    #Mininum and maximum wavelength of Ocean View
-    minwavelength = 400.0
-    maxwavelength = np.max(wavelength)
+    intensity_stand = reference['intensity'].values*1e+16
 
     #Mask reference data to have values only inside our ocean range
     mask = (wavelength_stand >= minwavelength) & (wavelength_stand <= maxwavelength)
 
     #mask our data to have values only above 350 mm
-    mask_2 =  (wavelength >= minwavelength) 
+    mask_2 =  (wavelength >= minwavelength)& (wavelength <= maxwavelength)
     # print(mask, mask.shape)
     # print(mask_2, mask_2.shape)
 
@@ -260,42 +257,43 @@ def Build_Instrument_Response(data, reference, plot=False):
     wavelength = wavelength[mask_2]
     intensity_truncated = intensity_stand[mask]
     intensity = intensity[mask_2]
-    # print(intensity_truncated.shape)
-
+    # print(wavelength_truncated)
 
 
     #Interpolate the reference data
-    interpolate = CubicSpline(wavelength_truncated, intensity_truncated)
+    # interpolate = CubicSpline(wavelength_truncated, intensity_truncated)
+    interpolate = interp1d(wavelength_truncated, intensity_truncated, kind='linear', fill_value="extrapolate")
 
     #Get the values of the reference data at our ocean wavelenghts
     intensity_standard = interpolate(wavelength)
 
-    if plot==True:
-        fig1, axs1 = plt.subplots(2, 1, figsize=(12, 8))
-        PlotData(axs1[0], reference, 'Reference Data Raw', 'Raw data')
-        axs1[1].plot(wavelength_truncated,intensity_truncated)
-        plt.show()
+    # if plot==True:
+    #     fig1, axs1 = plt.subplots(2, 1, figsize=(12, 8))
+    #     PlotData(axs1[0], reference, 'Reference Data Raw', 'Raw data')
+    #     axs1[1].plot(wavelength_truncated,intensity_truncated)
+    #     plt.show()
 
-    #Save this data on a pandas dataframe
-    d = {'wavelength': wavelength, 'intensity': intensity}
-    norma_data_df = pd.DataFrame(data=d)
+
+    norma_data_df = pd.DataFrame({'wavelength': wavelength,
+                                  'intensity': intensity})
     # print(norma_data_df['wavelength'])
 
     d1 = {'wavelength': wavelength, 'intensity': intensity_standard}
     norma_ref_df = pd.DataFrame(data=d1)
 
     # Calculate scale factor and normalize observed counts
-    ourdata_sum = np.sum(intensity)
-    standard_sum = np.sum(intensity_standard)
+    ourdata_sum = np.trapz(intensity, wavelength)
+    standard_sum = np.trapz(intensity_standard, wavelength)
     scale_factor = standard_sum / ourdata_sum
 
 
     norma_data_df['intensity'] *= scale_factor
 
-
     ins_response = norma_data_df.copy()
     
     ins_response['intensity'] = norma_data_df['intensity'].values/norma_ref_df['intensity'].values
+    # print(ins_response.shape)
+
     
 
     if plot==True:
@@ -414,54 +412,62 @@ def BlackBodyFit(temperature, wavelength, intensity, image = False):
         ax[1].set_title('Continuum Normalized Spectrum')
         ax[1].grid(True)
 
+    return spec_norm
+
 
 def DetectAndPlotLines(spectra, wavelength_truncated, spectral_lines, telluric_lines, threshold, title = None, save = False, path = None, name = None):
 
     detected_lines = {}
     telluric_lines_d = {}
 
-    # Step 4: Check for each line if its depth/strength exceeds the threshold
-    for line_name, line_wavelength in spectral_lines.items():
-        index = np.argmin(np.abs(wavelength_truncated - line_wavelength))
-        flux = spectra[index]
-        depth = - flux
-        if depth >= threshold:
-            if flux < spectra[index - 10] and flux < spectra[index + 10]:
-                detected_lines[line_name] = line_wavelength
+    for line_name, line_wavelengths in spectral_lines.items():
+        detected_lines[line_name] = []
+        for line_wavelength in line_wavelengths:
+            index = np.argmin(np.abs(wavelength_truncated - line_wavelength))
+            print(f'{line_wavelength}, {index}')
+
+            flux = spectra[index]
+            print(spectra[132])
+            depth = - flux
+            if depth >= threshold:
+                detected_lines[line_name].append(line_wavelength)
+    print(detected_lines)
 
     for line_wavelength in telluric_lines["TL"]:
         index = np.argmin(np.abs(wavelength_truncated - line_wavelength))
         flux = spectra[index]
         depth = - flux
         if depth >= 0.02:
-            if flux < spectra[index - 1] and flux < spectra[index + 1]:
+            if flux < spectra[index - 2] and flux < spectra[index + 2]:
                 telluric_lines_d[line_wavelength] = line_wavelength
 
+    all_lines = list(itertools.chain(*detected_lines.values())) + list(telluric_lines_d.values())
+    line_names = list(itertools.chain(*[[name] * len(wavelengths) for name, wavelengths in detected_lines.items()])) + ["TL"] * len(telluric_lines_d)
     fig, ax = lineid_plot.plot_line_ids(
         wavelength_truncated,
         spectra,
-        list(detected_lines.values()) + list(telluric_lines_d.values()),  # Flux values of detected lines
-        list(detected_lines.keys()) + ["TL"]*len(telluric_lines_d),    # Names of detected lines
+        all_lines,  # Flux values of detected lines
+        line_names,    # Names of detected lines
         max_iter = 100)
     fig.set_size_inches(12, 6)
     num_detected_lines = len(detected_lines)  # Count of detected lines
     num_telluric_lines = len(telluric_lines_d)  # Count of telluric lines
 
-    for index in range(num_detected_lines+1, num_detected_lines + num_telluric_lines+1):
-        line = ax.lines[index]
-        line.set_color("red")
-        line.set_linestyle("--")
-
-    for text in ax.texts:
-        if text.get_text() == "TL":  # Target labels with "TL"
-            text.set_visible(False)
-        if text.get_text() != "TL":  # Ignore telluric lines
+    for i, text in enumerate(ax.texts):
+        if text.get_text() == "TL":  # Check if the text label is "TL"
+            # Get the corresponding line using the same index
+            line = ax.lines[i+1]  # Line corresponding to this text label
+            line.set_color("red")
+            line.set_linestyle("--")
+            text.set_visible(False)  # Hide the "TL" text label
+        else:
+            # Adjust the position of non-TL text labels
             text.set_y(text.get_position()[1] + 0.005)
 
     ax.set_xlabel('Wavelength, nm')
     ax.set_ylabel('Normalised flux')
     tl = mpl.lines.Line2D([], [], color='r', linestyle = '--')
-    ax.legend([tl], ['Telluric line'])
+    # ax.legend([tl], ['Telluric line'])
     ax.set_title(title, y = 1.2, fontweight="bold")
     if save:
         plt.savefig(path+name, dpi = 600)
