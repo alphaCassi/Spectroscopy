@@ -1,7 +1,7 @@
 # Spectroscopy
 Spectra processing
 
-Reuiqred libraries:
+Required libraries:
 
 pandas
 matplotlib
